@@ -1,0 +1,369 @@
+---
+title: "RF"
+output:
+  html_document:
+    df_print: paged
+date: "2024-10-31"
+---
+
+In this script we run the random forest algorithm to predict VF performance (i.e., sum scores, first RT and subsequent RT) from executive function and linguistic knowledge scores. Data was processed in prior R scripts.  
+
+# Setup
+```{r results = 'hide', message=FALSE, warning=FALSE}
+library(tidyverse)
+library(ranger)
+library(vip)
+library(iml)
+library(corrplot)
+library(Hmisc)
+library(xtable)
+library(randomForestExplainer)
+library(randomForest)
+library(tuneRanger)
+library(mlr)
+
+set.seed(092024)
+
+knitr::opts_chunk$set(warning = FALSE, message = FALSE) 
+```
+
+Load data 
+```{r}
+allscores <- read.csv("../rf_data_FINAL_250225.csv") 
+
+allscores <- allscores %>%
+  mutate(VF_sem_firstRT =  VF_sem_firstRT / 1000) %>% #for easier readability, RT scores are transformed from ms to seconds 
+  mutate(VF_phon_firstRT = VF_phon_firstRT / 1000) %>%
+  mutate(VF_sem_subseqRT = VF_sem_subseqRT / 1000) %>%
+  mutate(VF_phon_subseqRT = VF_phon_subseqRT / 1000) %>%
+  select(-X)
+
+head(allscores)
+
+allscores %>% nrow()
+
+# semantic data
+sem_data <- allscores %>%
+  select(-VF_phon_firstRT, -VF_phon_subseqRT, -VF_phon_sumScore) %>%
+  drop_na()
+
+sem_data %>% nrow()
+
+# phonemic data
+phon_data <- allscores %>%
+  select(-VF_sem_firstRT, -VF_sem_subseqRT, -VF_sem_sumScore) %>%
+  drop_na()
+
+phon_data %>% nrow()
+
+```
+
+
+# 1. Prepare Random Forests with ranger
+```{r}
+# prepare formulas, i.e. what is predicated based on which variables
+preds <- "ling_knowledge + proc_speed_visual + reasoning + working_memory"
+
+sem_sumScore_formula <- paste0("VF_sem_sumScore ~ ", preds)
+sem_firstRT_formula <- paste0("VF_sem_firstRT ~ ", preds)
+sem_subseqRT_formula <- paste0("VF_sem_subseqRT ~ ", preds)
+
+
+phon_sumScore_formula <- paste0("VF_phon_sumScore ~ ", preds)
+phon_firstRT_formula <- paste0("VF_phon_firstRT ~ ", preds)
+phon_subseqRT_formula <- paste0("VF_phon_subseqRT ~ ", preds)
+
+```
+We run RFs for each scoring method (sum score, first RT and subsequent RT) for each VF type (semantic and phonemic) -> 6 RFs in total 
+
+# 2. Semantic RF runs
+
+## 2.1 Sum Score
+```{r}
+# RF run
+rf_sem_sumScore <- ranger(sem_sumScore_formula, 
+                   data = sem_data, 
+                   importance = 'permutation',
+                   scale.permutation.importance = TRUE)
+# RF info
+rf_sem_sumScore
+
+# error summary stats
+summary(sem_data$VF_sem_sumScore - rf_sem_sumScore$predictions)
+```
+
+
+ plot training predictions against actual values
+```{r}
+plot(sem_data$VF_sem_sumScore ~ rf_sem_sumScore$predictions, xlab="fitted", ylab="actual", xlim=c(10,50), ylim=c(10,50), main="Semantic VF sum scores vs. predictions")
+grid(); abline(0,1)
+
+# correlation - prediction vs actual 
+cor(rf_sem_sumScore$predictions,sem_data$VF_sem_sumScore)
+
+# feature importance
+vip(rf_sem_sumScore)
+```
+
+
+## 2.2 first RT 
+```{r}
+# RF run
+rf_sem_firstRT <- ranger(sem_firstRT_formula, 
+                   data = sem_data, 
+                   importance = 'permutation',
+                   scale.permutation.importance = TRUE)
+# RF info
+rf_sem_firstRT
+
+# error summary stats
+summary(sem_data$VF_sem_firstRT - rf_sem_firstRT$predictions)
+```
+
+plot training predictions against actual values
+```{r}
+
+plot(sem_data$VF_sem_firstRT ~ rf_sem_firstRT$predictions, xlab="fitted", ylab="actual", xlim=c(1,6), ylim=c(1,12), main="Semantic VF first RT vs. predictions")
+grid(); abline(0,1)
+
+# correlation - prediction vs actual 
+cor(sem_data$VF_sem_firstRT , rf_sem_firstRT$predictions)
+
+# feature importance
+vip(rf_sem_firstRT)
+```
+
+
+## 2.3  subsequent RT 
+```{r}
+# RF run
+rf_sem_subseqRT <- ranger(sem_subseqRT_formula, 
+                   data = sem_data , 
+                   importance = 'permutation',
+                   scale.permutation.importance = TRUE)
+# RF info
+rf_sem_subseqRT
+
+# error summary stats
+summary(sem_data$VF_sem_subseqRT - rf_sem_subseqRT$predictions)
+```
+
+plot training predictions against actual values
+```{r}
+plot(sem_data$VF_sem_subseqRT ~ rf_sem_subseqRT$predictions, xlab="fitted", ylab="actual", xlim=c(15,35), ylim=c(15,35), main="Semantic VF subsequent RT vs. predictions")
+grid(); abline(0,1)
+
+# correlation - prediction vs actual 
+cor(sem_data$VF_sem_subseqRT , rf_sem_subseqRT$predictions)
+
+# feature importance
+vip(rf_sem_subseqRT)
+```
+
+
+# 3. Phonemic RF runs
+
+## 3.1 Sum Score
+```{r}
+# RF run
+rf_phon_sumScore <- ranger(phon_sumScore_formula, 
+                   data = phon_data , 
+                   importance = 'permutation',
+                   scale.permutation.importance = TRUE)
+# RF info
+rf_phon_sumScore
+
+# error summary stats
+summary(phon_data$VF_phon_sumScore - rf_phon_sumScore$predictions)
+```
+
+
+plot training predictions against actual values
+```{r}
+plot(phon_data$VF_phon_sumScore ~ rf_phon_sumScore$predictions, xlab="fitted", ylab="actual", xlim=c(0,35), ylim=c(0,35), main="Phonemic VF sum scores vs. predictions")
+grid(); abline(0,1)
+
+# correlation - prediction vs actual 
+cor(rf_phon_sumScore$predictions,phon_data$VF_phon_sumScore)
+
+# feature importance
+vip(rf_phon_sumScore)
+```
+
+
+###  first RT 
+```{r}
+# RF run
+rf_phon_firstRT <- ranger(phon_firstRT_formula, 
+                   data = phon_data , 
+                   importance = 'permutation',
+                   scale.permutation.importance = TRUE)
+# RF info
+rf_phon_firstRT
+
+# error summary stats
+summary(phon_data$VF_phon_firstRT - rf_phon_firstRT$predictions)
+```
+
+plot training predictions against actual values
+```{r}
+plot(phon_data$VF_phon_firstRT ~ rf_phon_firstRT$predictions, xlab="fitted", ylab="actual", xlim=c(1,6), ylim=c(1,6), main="Phonemic VF first RT vs. predictions")
+grid(); abline(0,1)
+
+# correlation - prediction vs actual 
+cor(phon_data$VF_phon_firstRT , rf_phon_firstRT$predictions)
+
+# feature importance
+vip(rf_phon_firstRT)
+```
+
+###  subsequent RT 
+```{r}
+# RF run
+rf_phon_subseqRT <- ranger(phon_subseqRT_formula, 
+                   data = phon_data , 
+                   importance = 'permutation',
+                   scale.permutation.importance = TRUE)
+# RF info
+rf_phon_subseqRT
+
+# error summary stats
+summary(phon_data$VF_phon_subseqRT - rf_phon_subseqRT$predictions)
+```
+
+plot training predictions against actual values
+```{r}
+plot(phon_data$VF_phon_subseqRT ~ rf_phon_subseqRT$predictions, xlab="fitted", ylab="actual", xlim=c(15,35), ylim=c(15,35), main="Phonemic VF subsequent RT vs. predictions")
+grid(); abline(0,1)
+
+# correlation - prediction vs actual 
+cor(phon_data$VF_phon_subseqRT , rf_phon_subseqRT$predictions)
+
+# feature importance
+vip(rf_phon_subseqRT)
+```
+
+
+# 4. Explorations
+
+## 4.1 Hyperparameter tuning
+
+### 4.1.1 Semantic Sum score
+
+In order to see, whether hyperparameter tuning (which is usually an important part of machine learning approaches) is practical here, we first only tune parameters for semantic and phonemic sumScore. If hyperparameter tuning does not substantially improve performance, no further tuning will be done. 
+
+```{r results = 'hide', message=FALSE, warning=FALSE}
+# A mlr task has to be created in order to use the package
+DV <- sem_data %>% select(VF_sem_sumScore, ling_knowledge, proc_speed_visual, working_memory, reasoning )
+task = makeRegrTask(data = DV, target = "VF_sem_sumScore")
+# Estimate runtime
+estimateTimeTuneRanger(task)
+# Tuning
+tunedRF = tuneRanger(task)
+```
+
+```{r}
+tunedRF$recommended.pars
+```
+
+New RF run with tuned parameter
+```{r}
+# RF run
+rf_sem_sumScore <- ranger(sem_sumScore_formula, 
+                   data = sem_data , 
+                   importance = 'permutation',
+                   scale.permutation.importance = TRUE,
+                   mtry = tunedRF$recommended.pars$mtry,
+                   min.node.size = tunedRF$recommended.pars$min.node.size)
+# RF info
+rf_sem_sumScore
+
+# error summary stats
+summary(sem_data$VF_sem_sumScore - rf_sem_sumScore$predictions)
+```
+
+
+plot training predictions against actual values
+```{r}
+plot(sem_data$VF_sem_sumScore ~ rf_sem_sumScore$predictions, xlab="fitted", ylab="actual", xlim=c(10,50), ylim=c(10,50), main="Semantic VF sum scores vs. predictions")
+grid(); abline(0,1)
+
+# correlation - prediction vs actual 
+cor(rf_sem_sumScore$predictions,sem_data$VF_sem_sumScore)
+
+# feature importance
+vip(rf_sem_sumScore)
+```
+
+The performance improved but predictions are still unsatisfying (e.g., high error score). We only run the hyperparameter tuning for phonemic sum scores as well for comparison; but since prediction performance is still unsatisfying, we refrain from further tuning. However, since tuning improved performance slightly, this might still be crucial for future endeavors in predicting VF performance with RF or other machine-learning methods. 
+
+### 4.1.2 Phonemic Sum score
+
+```{r results = 'hide', message=FALSE, warning=FALSE}
+# A mlr task has to be created in order to use the package
+DV <- phon_data %>% select(VF_phon_sumScore, ling_knowledge, proc_speed_visual, working_memory, reasoning )
+task = makeRegrTask(data = DV, target = "VF_phon_sumScore")
+# Estimate runtime
+estimateTimeTuneRanger(task)
+# Tuning
+tunedRF = tuneRanger(task)
+```
+
+```{r}
+tunedRF$recommended.pars
+```
+
+
+New RF run with tuned parameter
+```{r}
+# RF run
+rf_phon_sumScore <- ranger(phon_sumScore_formula, 
+                   data = phon_data , 
+                   importance = 'permutation',
+                   scale.permutation.importance = TRUE,
+                   mtry = tunedRF$recommended.pars$mtry,
+                   min.node.size = tunedRF$recommended.pars$min.node.size)
+# RF info
+rf_phon_sumScore
+
+# error summary stats
+summary(phon_data$VF_phon_sumScore - rf_phon_sumScore$predictions)
+```
+
+
+plot training predictions against actual values
+```{r}
+
+plot(phon_data$VF_phon_sumScore ~ rf_phon_sumScore$predictions, xlab="fitted", ylab="actual", xlim=c(0,35), ylim=c(0,35), main="Phonemic VF sum scores vs. predictions")
+grid(); abline(0,1)
+
+# correlation - prediction vs actual 
+cor(rf_phon_sumScore$predictions,phon_data$VF_phon_sumScore)
+
+# feature importance
+vip(rf_phon_sumScore)
+```
+
+
+## 4.2 randomForest package
+
+According to this article (https://www.css.cornell.edu/faculty/dgr2/_static/files/R_html/CompareRandomForestPackages.html) and this thesis (http://essay.utwente.nl/87695/1/Smulers_BA_EEMCS.pdf ), performance of randomForest and ranger is in general very similar. For a little comparison, we look at the Rf runs for both semantic and phonemic sum score.
+
+### 4.2.1 Semantic sum score
+```{r}
+DV_scores <- sem_data %>% select( -VF_sem_firstRT, -VF_sem_subseqRT)
+
+rf_sem_sumScore_2 <- randomForest(VF_sem_sumScore ~ ., data = DV_scores, importance = TRUE, mtry = 3)
+
+rf_sem_sumScore_2
+```
+### 4.2.2 Phonemic sum score
+```{r}
+DV_scores <- phon_data %>% select(-VF_phon_firstRT, -VF_phon_subseqRT)
+
+rf_phon_sumScore_2 <- randomForest(VF_phon_sumScore ~ ., data = DV_scores, importance = TRUE, mtry = 3)
+
+rf_phon_sumScore_2
+```
+-> randomForest package shows little difference in performance to ranger here.
+

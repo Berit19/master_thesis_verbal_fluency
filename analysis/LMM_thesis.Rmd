@@ -1,0 +1,441 @@
+---
+title: "Verbal Fluency LMM Analysis MA thesis"
+output:
+  word_document: default
+  html_document: default
+  pdf_document: default
+date: "2024-09-17"
+---
+
+```{r results = 'hide', message=FALSE, warning=FALSE}
+library(tidyverse)
+library(corrplot)
+library(Hmisc)
+library(xtable)
+library(Matrix)
+library(lme4)
+library(lmerTest)
+library(ggeffects)
+library(sjPlot)
+library(broom.mixed)
+library(magrittr)
+library(rsq)
+
+knitr::opts_chunk$set(warning = FALSE, message = FALSE) 
+```
+
+Load preprocessed data
+```{r}
+sem_data <- read.csv("../sem_data_FINAL_250225.csv") %>%
+  mutate(measure = factor(measure, levels = c("sumScore_z", "subseqRT_z", "firstRT_z"))) %>% 
+  mutate(z_scores = case_when(
+    measure == "firstRT_z" ~ z_scores * -1, #harmonize firstRT such that fast RTs are represented as high scores
+    TRUE ~ z_scores
+  )) 
+
+phon_data <- read.csv("../phon_data_FINAL_250225.csv")  %>%
+  mutate(measure = factor(measure, levels = c("sumScore_z", "subseqRT_z", "firstRT_z"))) %>% 
+  mutate(z_scores = case_when(
+    measure == "firstRT_z" ~ z_scores * -1, 
+    TRUE ~ z_scores
+  ))
+```
+
+
+# Model 1: semantic VF 
+
+## Factor coding
+```{r}
+levels(sem_data$measure)
+
+contrasts(sem_data$measure) <- contr.sum(3)
+
+contrasts(sem_data$measure)
+```
+
+## Model
+
+
+Model 1: mod1 <- lmer(z_scores ~  measure * (ling_knowledge_z + proc_speed_visual_z + working_memory_z  + reasoning_z) + (1 |UUID) + (1| Prompt), data = sem_data) 
+
+-> failed to converge; our intuition is that this is due to Prompt as a random effect since the two semantic prompts 'dieren'(animal) and 'eten' (food/drink) are probably very similar in difficulty etc. such that performance between them does not differ substantively; instead we will run the models with Prompt as fixed effect
+
+```{r, results='hide'}
+#mod1 <- lmer(z_scores ~  measure * (ling_knowledge_z + proc_speed_visual_z + working_memory_z  + reasoning_z) + (1 |UUID) + (1| Prompt), data = sem_data)
+
+mod1 <- lmer(z_scores ~ Prompt + measure * (ling_knowledge_z + proc_speed_visual_z + working_memory_z +  reasoning_z) + (1 |UUID), data = sem_data)
+```
+
+```{r}
+summary(mod1) 
+```
+
+
+
+Random Effects
+```{r}
+mod1_randomE <- tidy(mod1) %>%
+    filter(effect == 'ran_pars') %>%
+    select(c(term, estimate)) %>%
+    mutate(term = fct_recode(term,
+    "Random intercept: Participant" = "sd__(Intercept)", 
+    "Residual" = "sd__Observation"))
+ 
+colnames(mod1_randomE) <- c("Random effects", "sd")
+   
+(mod1_randomE %>%
+  kableExtra::kbl(format = "markdown"))
+```
+
+Fixed Effects
+```{r}
+(mod1_out <- tidy(mod1, conf.int = TRUE) %>% 
+  filter(effect == "fixed") %>% 
+  select(-c(effect, group, df)) %>%
+  mutate(sig. = case_when(
+    p.value < 0.001 ~ "***",
+    p.value < 0.01 & p.value > 0.001 ~ "**",
+    p.value < 0.05 & p.value > 0.01 ~ "*",
+    TRUE ~ ""),
+    across(where(is.numeric), round, 2),
+         p.value = as.character(p.value),
+         p.value = if_else(p.value == 0.0000, "<0.0001", p.value)
+         )  %>% 
+  mutate(across(where(is.numeric), round, 3)) %>% 
+  relocate(term, estimate, std.error, conf.low, conf.high, statistic, p.value, sig.) %>% 
+  rename(
+    "SE" = std.error,
+    "t-value" = statistic,
+    "p-value" = p.value,
+    "CI_lb" = conf.low,
+    "CI_ub" = conf.high
+  ) 
+)
+
+(mod1_out  %>% 
+   mutate(term = fct_recode(term, 
+     "Prompt: Food" = "Prompteten", 
+     "Score: Sum score" = "measure1",
+     "Score: Subsequent RT" = "measure2",
+     "Linguistic knowledge" = "ling_knowledge_z",
+     "Processing speed" = "proc_speed_visual_z",
+     "Working memory" = "working_memory_z",
+     "Nonverbal reasoning" = "reasoning_z",
+     "Sum scores: Linguistic knowledge" = "measure1:ling_knowledge_z",
+     "Subseq. RT: Linguistic knowledge"= "measure2:ling_knowledge_z", 
+     "Sum scores: Processing speed" = "measure1:proc_speed_visual_z",
+     "Subseq. RT: Processing speed" = "measure2:proc_speed_visual_z",
+     "Sum scores: Working memory" = "measure1:working_memory_z",
+     "Subseq. RT: Working memory" = "measure2:working_memory_z",
+     "Sum scores: Nonverbal reasoning"= "measure1:reasoning_z",
+     "Subseq. RT: Nonverbal reasoning"= "measure2:reasoning_z"
+   )) %>% 
+  kableExtra::kbl(format = "markdown") )
+```
+
+
+### Summary in text 
+
+Random effect of UUID (intercept for participant) shows a variance of 0.XX (SD =`r mod1_randomE %>% filter("Random effects" == "Random intercept: Participant") %$% sd`) indicating differences between individuals in their performance in general.
+
+As suspected, prompt (food/drink and animal) has no significant influence on the semantic VF performance.
+
+We can see main effects for linguistic knowledge, processing speed and working memory. They significantly influence all scoring methods of VF (firstRT, subseqRT and sumScore). In other words, better linguistic performance (higher scores) leads to higher VF scores (b= `r mod1_out %>% filter(term == "ling_knowledge_z") %$% estimate` [`r mod1_out %>% filter(term == "ling_knowledge_z") %$% CI_lb`, `r mod1_out %>% filter(term == "ling_knowledge_z") %$% CI_ub`]). Faster processing speed also leads to higher VF scores (b= `r mod1_out %>% filter(term == "proc_speed_visual_z") %$% estimate` [`r mod1_out %>% filter(term == "proc_speed_visual_z") %$% CI_lb`, `r mod1_out %>% filter(term == "proc_speed_visual_z") %$% CI_ub`]) and better working memory capacity leads to higher VF scores as well (b= `r mod1_out %>% filter(term == "working_memory_z") %$% estimate` [`r mod1_out %>% filter(term == "working_memory_z") %$% CI_lb`, `r mod1_out %>% filter(term == "working_memory_z" CI_ub`]). There is no significant main effect of nonverbal reasoning on the scoring methods for semantic vF. 
+
+There is significant interaction between linguistic knowledge and the sum scores (b= `r mod1_out %>% filter(term == "measure1:ling_knowledge_z") %$% estimate` [`r mod1_out %>% filter(term == "measure1:ling_knowledge_z") %$% CI_lb`, `r mod1_out %>% filter(term == "measure1:ling_knowledge_z") %$% CI_ub`] ) showing that having good linguistic knowledge leads to more correctly produced words (higher sum scores). There is no significant interaction between subsequent RTs and linguistic knowledge which indicates that people did not differ in their time points where half of their responses were produced in context of their linguistic knowledge. Figure 1 shows that first RTs seem to be slightly negatively impacted by higher linguistic knowledge which would mean that people with higher linguistic knowledge took longer to produce the first word. 
+
+While faster processing speed performance leads to higher sum scores and faster first RTs (see Figure 2), it does not seem to affect subsequent RTs.   
+
+Lastly, working memory significantly affects sum scores (b= `r mod1_out %>% filter(term == "measure1:working_memory_z") %$% estimate` [`r mod1_out %>% filter(term == "measure1:working_memory_z") %$% CI_lb`, `r mod1_out %>% filter(term == "measure1:working_memory_z") %$% CI_ub`] ), but not the other two scoring methods. 
+
+
+Explained variance
+```{r}
+# R squared
+rsq.lmm(mod1,adj=FALSE)
+
+# adjusted R squared
+rsq.lmm(mod1,adj=TRUE)
+```
+As typical for psycholinguistic research, adjusted R squared indicates low explained variance (approx. 4%) by the fixed effects. Nevertheless, significant effects and interactions show important connections between VF and domain-general abilities and linguistic knowledge. 
+
+
+## Assumptions
+```{r}
+plot(mod1)
+
+plot(resid(mod1))
+
+qqnorm(resid(mod1))
+
+car::vif(mod1)
+```
+The model seems to conform to the assumptions (homoscedasticity, normality of residuals, no multicollinearity). 
+
+
+## Effect plots
+
+### Fig 1: Ling.Know
+```{r}
+(sem1 <- plot(ggeffect(mod1, terms = c("ling_knowledge_z", "measure")), show_legend = T)+
+  labs(title = "Semantic VF: Interaction between scoring method and linguistic knowledge",
+       y= "Performance (z-score)",
+       x = "Linguistic Knowledge (factor score)",
+       color = "Scoring method") +
+  coord_cartesian(xlim = c(-3, 3), ylim = c(-.75, .75))+
+  scale_color_manual(values = c("#04336b", "#0b6b04", "#e68922")) +
+  scale_fill_manual(values = c("#04336b", "#0b6b04", "#e68922"))
+)
+
+#ggsave("../figs/MAFig_Sem_LingKnow.png", sem1, width = 20, height = 11, units = "cm", bg = "white")
+```
+
+### Fig 2: Proc.Speed
+```{r}
+(sem2 <- plot(ggeffect(mod1, terms = c("proc_speed_visual_z", "measure")),  show.legend = T)+
+  labs(title = "Semantic VF: Interaction between scoring method and processing speed",
+       y= "Performance (z-score)",
+       x = "Processing Speed (factor score)",
+       color = "Scoring method") +
+  coord_cartesian(xlim = c(-3, 3), ylim = c(-.75, .75))+
+  scale_color_manual(values = c("#04336b", "#0b6b04", "#e68922")) +
+  scale_fill_manual(values = c("#04336b", "#0b6b04", "#e68922")))
+
+
+
+#ggsave("../figs/MAFig_Sem_ProcSpeed.png", sem2, width = 20, height = 11, units = "cm", bg = "white")
+```
+
+### Fig 3: WM 
+```{r}
+(sem3 <- plot(ggeffect(mod1, terms = c("working_memory_z", "measure")),  show.legend = T)+
+  labs(title = "Semantic VF: Interaction between scoring method and working memory",
+       y= "Performance (z-score)",
+       x = "Working memory (factor score)",
+       color = "Scoring method") +
+  coord_cartesian(xlim = c(-3, 3), ylim = c(-.75, .75))+
+  scale_color_manual(values = c("#04336b", "#0b6b04", "#e68922")) +
+  scale_fill_manual(values = c("#04336b", "#0b6b04", "#e68922")))
+
+
+
+#ggsave("../figs/MAFig_Sem_WM.png", sem3, width = 20, height = 11, units = "cm", bg = "white")
+```
+
+
+
+Predictions
+```{r}
+(mod1_preds <- ggeffect(mod1, terms = c("ling_knowledge_z", "measure")) %>% 
+  as.data.frame() %>% 
+  select(x, predicted, std.error, conf.low, conf.high, group) %>% 
+  rename(term = x) %>% 
+   mutate(
+     across(where(is.numeric), round, 2)
+     )%>% 
+  rename(
+    "SE" = std.error,
+    "CI_lb" = conf.low,
+    "CI_ub" = conf.high
+  )%>% 
+  arrange(term) %>% 
+   select(term, group, everything())
+)
+
+mod1_preds %>% 
+  kableExtra::kbl(format = "markdown") 
+```
+
+
+```{r}
+(mod1_cond <- plot(ggeffect(mod1, terms = "measure")) + 
+  labs(x = "Measure"))
+
+```
+
+
+
+# Model 2: Phonemic VF 
+
+## Factor coding
+```{r}
+contrasts(phon_data$measure) <- contr.sum(3)
+
+contrasts(phon_data$measure)
+```
+
+## Model
+
+Note, that Prompt is also included as fixed effect here, so that the models are matching
+```{r, results='hide'}
+mod2 <- lmer(z_scores ~  Prompt + measure * (ling_knowledge_z + proc_speed_visual_z + working_memory_z + reasoning_z) + (1 |UUID), data = phon_data)
+```
+
+```{r}
+summary(mod2)
+```
+
+
+Random Effects
+```{r}
+mod2_randomE <- tidy(mod2) %>%
+    filter(effect == 'ran_pars') %>%
+    select(c(term, estimate)) %>%
+    mutate(term = fct_recode(term,
+    "Random intercept: Participant" = "sd__(Intercept)", 
+    "Residual" = "sd__Observation"))
+ 
+colnames(mod2_randomE) <- c("Random effects", "sd")
+   
+(mod2_randomE %>%
+  kableExtra::kbl(format = "markdown"))
+```
+
+
+Fixed Effects
+```{r}
+(mod2_out <- tidy(mod2, conf.int = TRUE) %>% 
+  filter(effect == "fixed") %>% 
+  select(-c(effect, group, df)) %>%
+  mutate(sig. = case_when(
+    p.value < 0.001 ~ "***",
+    p.value < 0.01 & p.value > 0.001 ~ "**",
+    p.value < 0.05 & p.value > 0.01 ~ "*",
+    TRUE ~ "n.s."),
+    across(where(is.numeric), round, 2),
+         p.value = as.character(p.value),
+         p.value = if_else(p.value == 0.0000, "<0.0001", p.value)
+         )  %>% 
+  rename(
+    "SE" = std.error,
+    "t-value" = statistic,
+    "p-value" = p.value,
+    "CI_lb" = conf.low,
+    "CI_ub" = conf.high
+  ) %>%
+   relocate(term, estimate, SE, CI_lb, CI_ub, 't-value', 'p-value', sig.)
+)
+
+
+(mod2_out  %>% 
+   mutate(term = fct_recode(term, 
+     "Prompt: letter S" = "PromptS", 
+     "Score: Sum score" = "measure1",
+     "Score: Subsequent RT" = "measure2",
+     "Linguistic knowledge" = "ling_knowledge_z",
+     "Processing speed" = "proc_speed_visual_z",
+     "Working memory" = "working_memory_z",
+     "Nonverbal reasoning" = "reasoning_z",
+     "Sum scores: Linguistic knowledge" = "measure1:ling_knowledge_z",
+     "Subseq. RT: Linguistic knowledge"= "measure2:ling_knowledge_z", 
+     "Sum scores: Processing speed" = "measure1:proc_speed_visual_z",
+     "Subseq. RT: Processing speed" = "measure2:proc_speed_visual_z",
+     "Sum scores: Working memory" = "measure1:working_memory_z",
+     "Subseq. RT: Working memory" = "measure2:working_memory_z",
+     "Sum scores: Nonverbal reasoning"= "measure1:reasoning_z",
+     "Subseq. RT: Nonverbal reasoning"= "measure2:reasoning_z"
+   )) %>% 
+  kableExtra::kbl(format = "markdown") )
+```
+
+### Summary in text
+
+Random effect for participant is similar to the semantic model, showing a variance of 0.XX (SD =`r mod2_randomE %>% filter("Random effects" == "Random intercept: Participant") %$% sd`) indicating individual differences in performance.  
+
+There is a main effect for prompt indicating that performance varied between letter M vs letter S trials (b= `r mod2_out %>% filter(term == "PromptS") %$% estimate` [`r mod2_out %>% filter(term == "PromptS") %$% CI_lb`, `r mod2_out %>% filter(term == "PromptS") %$% CI_ub`] ). People seem to score better when given the prompt 'letter S' than when given the prompt 'letter M'.
+
+We can see that linguistic knowledge, processing speed and working memory capacity significantly influence all scoring methods of VF (firstRT, subseqRT and sumScore). That is, there is a main effect of linguistic knowledge where higher scores lead to better phonemic VF scores (b= `r mod2_out %>% filter(term == "ling_knowledge_z") %$% estimate` [`r mod2_out %>% filter(term == "ling_knowledge_z") %$% CI_lb`, `r mod2_out %>% filter(term == "ling_knowledge_z") %$% CI_ub`] ). Similarly, faster processing speed also leads to better VF scores (b= `r mod2_out %>% filter(term == "proc_speed_visual_z") %$% estimate` [`r mod2_out %>% filter(term == "proc_speed_visual_z") %$% CI_lb`, `r mod2_out %>% filter(term == "proc_speed_visual_z") %$% CI_ub`]). And there is also a main effect for working memory where better WM scores lead to better VF scores (b= `r mod2_out %>% filter(term == "working_memory_z") %$% estimate` [`r mod2_out %>% filter(term == "working_memory_z") %$% CI_lb`, `r mod2_out %>% filter(term == "working_memory_z") %$% CI_ub`]).There is no main effect for nonverbal reasoning. 
+
+There is significant interaction between linguistic knowledge and sum scores (b= `r mod2_out %>% filter(term == "measure1:ling_knowledge_z") %$% estimate` [`r mod2_out %>% filter(term == "measure1:ling_knowledge_z") %$% CI_lb`, `r mod2_out %>% filter(term == "measure1:ling_knowledge_z") %$% CI_ub`]) in such a way that higher linguistic knowledge leads to higher sum scores. Additionally, there is significant interaction with subsequent RTs (b= `r mod2_out %>% filter(term == "measure2:ling_knowledge_z") %$% estimate` [`r mod2_out %>% filter(term == "measure2:ling_knowledge_z") %$% CI_lb`, `r mod2_out %>% filter(term == "measure2:ling_knowledge_z") %$% CI_ub`]), but not nearly as strong as for sum scores (see Figure 4). Subsequent and first RTs seem to be affected in a positive way, where better linguistic knowledge leads to longer subsequent RT and faster first RT.  
+
+Further, processing speed shows a slightly negative interaction with subsequent RTs (b= `r mod2_out %>% filter(term == "measure2:proc_speed_visual_z") %$% estimate` [`r mod2_out %>% filter(term == "measure2:proc_speed_visual_z") %$% CI_lb`, `r mod2_out %>% filter(term == "measure2:proc_speed_visual_z") %$% CI_ub`]), but the interaction is not very strong. Sum scores and first RTs are impacted positively, meaning that people with better processing speed produce more words and their first word faster.
+
+In addition to that, there is significant interaction between working memory and sum scores (b= `r mod2_out %>% filter(term == "measure1:working_memory_z") %$% estimate` [`r mod2_out %>% filter(term == "measure1:working_memory_z") %$% CI_lb`, `r mod2_out %>% filter(term == "measure1:working_memory_z") %$% CI_ub`]) such that better working memory leads to higher sum scores. The interaction is also positive for the two time-related scores (see Figure 6).
+
+Lastly, there is a surprising interaction between nonverbal reasoning and sum scores (b= `r mod2_out %>% filter(term == "measure1:reasoning_z") %$% estimate` [`r mod2_out %>% filter(term == "measure1:reasoning_z") %$% CI_lb`, `r mod2_out %>% filter(term == "measure1:reasoning_z") %$% CI_ub`]) such that people who perform better in the nonverbal reasoning task (Raven's advanced matrices) have lower sum scores (see Figure 7). 
+
+
+
+Explained variance
+```{r}
+# R squared
+rsq.lmm(mod2,adj=FALSE)
+
+# adjusted R squared
+rsq.lmm(mod2,adj=TRUE)
+```
+
+
+
+## Assumptions
+```{r}
+plot(mod2)
+
+plot(resid(mod2))
+
+qqnorm(resid(mod2))
+
+car::vif(mod1)
+```
+
+
+## Effect plots
+
+### Fig 4: Ling.Know
+```{r}
+(phon1 <- plot(ggeffect(mod2, terms = c("ling_knowledge_z", "measure")), show.legend = T)+
+  labs(title = "Phonemic VF: Interaction between scoring method and linguistic knowledge",
+       y= "Performance (z-score)",
+       x = "Linguistic Knowledge (factor score)",
+       color = "Scoring method") +
+  coord_cartesian(xlim = c(-3, 3), ylim = c(-.75, .75))+
+  scale_color_manual(values = c("#04336b", "#0b6b04", "#e68922")) +
+  scale_fill_manual(values = c("#04336b", "#0b6b04", "#e68922")))
+
+
+ggsave("../figs/MAFig_Phon_LingKnow.png", phon1, width = 20, height = 11, units = "cm", bg = "white")
+```
+
+
+### Fig 5: Proc.Speed
+```{r}
+(phon2 <- plot(ggeffect(mod2, terms = c("proc_speed_visual_z", "measure")), show.legend = T)+
+  labs(title = "Phonemic VF: Interaction between scoring method and processing speed",
+       y= "Performance (z-score)",
+       x = "Processing Speed (factor score)",
+       color = "Scoring method") +
+  coord_cartesian(xlim = c(-3, 3), ylim = c(-.75, .75))+
+  scale_color_manual(values = c("#04336b", "#0b6b04", "#e68922")) +
+  scale_fill_manual(values = c("#04336b", "#0b6b04", "#e68922")))
+
+ggsave("../figs/MAFig_Phon_ProcSpeed.png", phon2, width = 20, height = 11, units = "cm", bg = "white")
+```
+
+### Fig 6: WM
+```{r}
+(phon3 <- plot(ggeffect(mod2, terms = c("working_memory_z", "measure")), show.legend = T)+
+  labs(title = "Phonemic VF: Interaction between scoring method and working memory",
+       y= "Performance (z-score)",
+       x = "Working Memory (factor score)",
+       color = "Scoring method") +
+  coord_cartesian(xlim = c(-2.5, 2.5), ylim = c(-.75, .75))+
+  scale_color_manual(values = c("#04336b", "#0b6b04", "#e68922")) +
+  scale_fill_manual(values = c("#04336b", "#0b6b04", "#e68922")))
+
+ggsave("../figs/MAFig_Phon_WM.png", phon3, width = 20, height = 11, units = "cm", bg = "white")
+```
+
+### Fig 7: Nonv.Reas
+```{r}
+(phon3 <- plot(ggeffect(mod2, terms = c("reasoning_z", "measure")), show.legend = T)+
+  labs(title = "Phonemic VF: Interaction between scoring method and nonverbal reasoning",
+       y= "Performance (z-score)",
+       x = "Nonverbal reasoning (factor score)",
+       color = "Scoring method") +
+  coord_cartesian(xlim = c(-2.5, 2.5), ylim = c(-.75, .75))+
+  scale_color_manual(values = c("#04336b", "#0b6b04", "#e68922")) +
+  scale_fill_manual(values = c("#04336b", "#0b6b04", "#e68922")))
+
+ggsave("../figs/MAFig_Phon_IQ.png", phon3, width = 20, height = 11, units = "cm", bg = "white")
+```
+

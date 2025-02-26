@@ -1,0 +1,1000 @@
+---
+title: "processing_complete"
+output:
+  html_document: default
+  word_document: default
+date: "2025-02-20"
+---
+
+This script includes all processing steps for the VF data. The VF audio files have been transcribed and force-aligned with Whisperx in an earlier step (see python scripts whisper_run and textgrid_to_csv). During that first step n=12 trials have been excluded because the last produced word was before the trial-timer was halfway through (<30s) indicating that participants might have given up early on.The data is now in form of a big merged CSV file that contains data from all participants' audio recordings. 
+
+# Setup
+
+```{r results = 'hide', message=FALSE, warning=FALSE}
+library(tidyverse)
+library(broom)
+library(wordcloud)
+library(RColorBrewer)
+library(tm)
+library(corrplot)
+library(gridExtra)
+library(ggcorrplot)
+knitr::opts_chunk$set(warning = FALSE, message = FALSE) 
+```
+
+# Load data 
+
+```{r}
+whisperx_data <- read_csv("../merged_CSVs.csv")
+
+# clean up variables
+whisperx_data <- whisperx_data %>% 
+  separate(id, into = c("UUID", "Prompt"), sep = "_") %>%
+  mutate(Prompt = recode_factor(Prompt, 
+                       "RecorderDieren" = "dieren",
+                       "RecorderEtenDrinken" = "eten",
+                       "RecorderS" = "S", 
+                       "RecorderM" = "M"))
+
+
+# how many participants do we have 
+whisperx_data %>% select(UUID) %>% unique() %>% nrow()
+# how many data points
+whisperx_data %>% group_by(UUID, Prompt) %>% distinct(Prompt) %>%  nrow()
+```
+
+
+# 1: Multiword adjustment
+We adjust the Whisperx outputs to account for multiwords like e.g. 'brown bear' as one item. We recalulate temporal variables (first RT and subsequent RT) to fit these adjustments. 
+
+```{r}
+# load manual annotations (which include multiwords)
+annotations <- read_csv2("../verbal_fluency_item_data.csv") %>% 
+  mutate(UUID = paste0("uuid-",UUID))
+```
+
+## 1.1 Semantic VF: animals
+
+```{r}
+# select all manual annotations for the animal prompt
+animals <- annotations %>% 
+  select(UUID, Dieren) %>% 
+  drop_na(Dieren)
+
+# clean up annotations (white spaces, numbers, punctuation,...)
+animals <- animals %>% 
+  mutate(Dieren = str_remove_all(Dieren, "\\(.*\\)")) %>% #remove text between parentheses
+  mutate(Dieren = str_remove_all(Dieren, ".*,")) %>% #remove words before commas (i.e. when a subordinate term was used)
+  mutate(Dieren = str_remove_all(Dieren, ".*\\s\\/")) %>% #remove words before forward slash (i.e. when a subordinate term was used)
+  mutate(Dieren = str_remove_all(Dieren, ".*\\sx\\d")) %>% #remove x2 (or other numbers) %>% 
+  mutate(Dieren = str_remove_all(Dieren, ".*\\s\\dx")) %>% #remove 2x (or other numbers) %>% 
+  mutate(Dieren = trimws(Dieren, which = "both"))
+
+# clean up annotations (typos, orthography)
+animals <- animals %>% 
+  mutate(Dieren = fct_recode(Dieren, 
+                             "orangoetan" = "orang oetan", 
+                            "orangoetan" = "orang oetang",
+                             "orangoetan" ="oerang otetan", 
+                             "orangoetan" = "oerang oetang",
+                            "orangoetan" = "orang-oetan",
+                            "orangoetan" = "orangoetang",
+                            "pinguïn" = "pingu n", 
+                            "pinguïns" = "pingu ns", 
+                            "dalmatiër" = "dalmati r", 
+                            "dinosauriër" = "dinosauri r",
+                            "reeën" = "re en"))
+
+# show all multiwords
+animals %>% 
+  filter(str_detect(Dieren, " ")) %>% 
+  distinct(Dieren)
+
+# make all multiwords into a new dataframe
+animals_2word <- animals %>% 
+  group_by(UUID) %>% 
+  filter(UUID != "uuid-024d872b-3164-4708-b0ed-110377fbfe53") %>% #apparently no text
+  filter(Dieren != "	/iets grotere kat") %>%  #idk why this is in there
+  filter(str_detect(Dieren, " ")) %>% 
+  mutate(W1 = str_extract(Dieren, ".*\\s"),
+         W1 = trimws(W1, which = "both"), 
+         W1 = tolower(W1)) %>% 
+  mutate(W2 = str_extract(Dieren, "\\s.*")) %>% 
+  distinct(UUID, Dieren, W1, W2)
+```
+
+Adjustments
+```{r}
+# make a dataframe with whisperx data such that words that were produced after each other are easier to compare with multiwords
+animal_grids <- whisperx_data %>% 
+  filter(Prompt == "dieren") %>% 
+  group_by(UUID) %>% 
+  mutate(next_item = lead(item)) %>% 
+  ungroup() %>% 
+  select(UUID, Prompt, item, next_item, start, dur) # drop subseqRT here because it has to be recalculated anyway
+
+# combine dataframes for comparison
+joined_animals <- animal_grids %>% 
+  rename(W1 = item) %>% 
+  left_join(animals_2word, by = c("UUID", "W1")) 
+
+# check whether consecutive words belong to a compound (multiword), if so, make the words into one item and adjust first RT and subsequent RT 
+final_animals <- joined_animals %>% 
+  mutate(compound = case_when(
+    str_detect(W2, next_item) ~ "YES",
+    .default = "NO")) %>% 
+   mutate(W1 = case_when(
+    compound == "YES" ~ Dieren,
+    .default = W1)) %>% # the next item still stays in W1 then 
+  mutate(next_dur = lead(dur)) %>% 
+  mutate(dur = case_when(
+    compound == "YES" ~ dur + next_dur,
+    .default = dur)) %>% 
+  mutate(prev_compound = lag(compound))%>%  #for deleting the second word of the compound
+  filter(prev_compound == "NO") %>% 
+  select(-next_item, -Dieren, - W2, -compound, -prev_compound, -next_dur) %>% 
+  rename(item = W1) %>%
+  group_by(UUID) %>% # calculate new subseqRT values
+  mutate(subseqRT = start - start[1])
+
+```
+Now compounds like "siberische tijger" show up as the item, with just the onset to the first word. The onset to the second word has been removed from the dataset. Duration has been summed (first word dur plus second word dur) and new subsequent RT calculated.
+
+```{r}
+# remove old df that are not used again
+rm(animals, animals_2word, animal_grids, joined_animals)
+```
+
+
+
+## 1.2 Semantic VF: food/drinks
+Same procedure as for the animal prompt with the addition that we also have to account for 3-word multiwords like 'chili con carne'
+
+```{r}
+# clean up of manual annotations
+food <- annotations %>% 
+  select(UUID, Eten = Eten...Drinken) %>% 
+  drop_na(Eten)
+
+food <- food %>% 
+  mutate(Eten = str_remove_all(Eten, "\\(.*\\)")) %>% #remove text between parentheses
+  mutate(Eten = str_remove_all(Eten, ".*,")) %>% #remove words before commas (i.e. when a subordinate term was used)
+  mutate(Eten = str_remove_all(Eten, ".*\\s\\/")) %>% #remove words before forward slash (i.e. when a subordinate term was used)
+  mutate(Eten = str_remove_all(Eten, ".*\\sx\\d")) %>% #remove x2 (or other numbers) %>% 
+  mutate(Eten = str_remove_all(Eten, ".*\\s\\dx")) %>% #remove 2x (or other numbers) %>% 
+  mutate(Eten = trimws(Eten, which = "both"))
+
+food <- food %>% 
+  mutate(Eten = fct_recode(Eten, 
+                            "mais" = "ma s", 
+                            "poké bowl" = "pok bowl",
+                            "paëlla" = "pa lla", 
+                            "knäckerbröd" = "kn ckerbr d",
+                            "döner" = "d ner", 
+                            "rösti" = "r sti", 
+                            "börek" = "b rek", 
+                            "glühwein" = "gluhwein",
+                            "glühwein" = "gl hwein",
+                            "jus d'orange" = "jus d' orange",
+                            "jus d'orange" = "jus 'd orange",
+                            "spinazie ala creme" = "spinazie a la creme")) #to make life easier
+
+# show food multiwords
+food %>% 
+  filter(str_detect(Eten, " ")) %>% 
+  distinct(Eten)
+
+# dataframe with multiwords
+food_2word <- food %>% 
+   group_by(UUID) %>% 
+  filter(str_detect(Eten, " ")) %>% 
+  filter(UUID != "uuid-024d872b-3164-4708-b0ed-110377fbfe53") %>% #apparently no text
+  mutate(W1 = str_extract(Eten, ".*\\s"),
+         W1 = trimws(W1, which = "both"), 
+         W1 = tolower(W1)) %>% 
+  mutate(W2 = str_extract(Eten, "\\s.*"),
+         W2 = trimws(W2, "l")) %>% 
+  distinct(UUID, Eten, W1, W2)
+
+food_3word <- food_2word %>% 
+  group_by(UUID) %>% 
+  filter(str_detect(W1, " ")) %>% 
+  mutate(W3 = str_extract(W2, "\\s.*")) %>%
+  mutate(W2 = str_extract(W1, "\\s.*")) %>%
+  mutate (W1 = str_extract(W1, ".*\\s"))
+
+food_multiword <- rbind(food_2word, food_3word)
+
+rm(food_2word, food_3word)
+```
+
+Adjustments
+```{r}
+food_grids <- whisperx_data %>% 
+  filter(Prompt == "eten") %>% 
+  group_by(UUID) %>% 
+  mutate(W2 = lead(item)) %>%  
+  mutate(W3 = lead(W2)) %>%
+  ungroup() %>% 
+  select(UUID, Prompt, item, W2, W3, start, dur) # drop subseqRT here because it has to be recalculated anyway
+
+
+joined_foods <- food_grids %>% 
+  rename(W1 = item) %>%
+  left_join(food_multiword, by = c("UUID", "W1", "W2")) %>%
+  mutate(to_delete = case_when(W3.x != W3.y ~ TRUE, #delete rows where a three word compound is possible but not correct
+                               .default = FALSE)) %>%
+  filter(to_delete == FALSE)
+
+
+final_foods <- joined_foods %>% 
+  mutate(compound = case_when(
+    !is.na(Eten) ~ "YES",
+    .default = "NO")) %>% 
+   mutate(W1 = case_when(
+    compound == "YES" ~ Eten,
+    .default = W1)) %>% 
+  mutate(next_dur = lead(dur)) %>% 
+  mutate(dur = case_when(
+    compound == "YES" ~ dur + next_dur,
+    .default = dur)) %>% 
+  mutate(prev_compound = lag(compound))%>%  #for deleting the second word of the compound
+  filter(prev_compound == "NO") %>%
+  select(-W2, -W3.x,-Eten, -to_delete, -compound, -prev_compound, -next_dur) %>%
+  mutate(compound = case_when( #for words with more than 2 parts
+    W3.y == lead(W1) ~ "YES",
+    .default = "NO")) %>%
+  mutate(next_dur = lead(dur)) %>% 
+  mutate(dur = case_when(
+    compound == "YES" ~ dur + next_dur,
+    .default = dur)) %>% 
+  mutate(prev_compound = lag(compound))%>%  #for deleting the third word of a compound
+  filter(prev_compound == "NO") %>%
+  select(-W3.y, -compound, -prev_compound, -next_dur) %>% 
+  rename(item = W1) %>%
+  group_by(UUID) %>% # calculate new subseqRT values
+  mutate(subseqRT = start - start[1])
+
+```
+
+```{r}
+rm(food, food_multiword, food_grids, joined_foods)
+```
+
+
+
+Same procedure for phonemic prompts
+
+## 1.3 Phonemic VF: S
+
+```{r}
+letter_S <- annotations %>% 
+  select(UUID, Letter.S) %>% 
+  drop_na(Letter.S)
+
+
+letter_S <- letter_S %>% 
+  mutate(Letter.S = str_remove_all(Letter.S, "\\(.*\\)")) %>% #remove text between parentheses
+  mutate(Letter.S = str_remove_all(Letter.S, ".*,")) %>% #remove words before commas (i.e. when a subordinate term was used)
+  mutate(Letter.S = str_remove_all(Letter.S, ".*\\s\\/")) %>% #remove words before forward slash (i.e. when a subordinate term was used)
+  mutate(Letter.S = str_remove_all(Letter.S, ".*\\sx\\d")) %>% #remove x2 (or other numbers) %>% 
+  mutate(Letter.S = str_remove_all(Letter.S, ".*\\s\\dx")) %>% #remove 2x (or other numbers) %>% 
+  mutate(Letter.S = trimws(Letter.S, which = "both"))
+
+# show multiwords for letter S 
+letter_S %>% 
+  filter(str_detect(Letter.S, " ")) %>% 
+  distinct(Letter.S)
+
+
+letter_S <- letter_S%>% 
+  mutate(Letter.S = fct_recode(Letter.S, 
+                            "sleeen" = "slee n", # should be an ï but others have transcribed with i and we want to stay consistent
+                            "skien" = "ski n",
+                            "skien" = "skieen",
+                            "stoicijns" = "sto cijns")) %>%
+  filter(UUID != "uuid-024d872b-3164-4708-b0ed-110377fbfe53") %>%
+  filter(UUID != "uuid-03b9e3f6-c010-4f5c-8539-e3cfc5b74c7d")
+
+
+letterS_2word <- letter_S %>% 
+  group_by(UUID) %>% 
+  filter(str_detect(Letter.S, " ")) %>% 
+  mutate(W1 = str_extract(Letter.S, ".*\\s"),
+         W1 = trimws(W1, which = "both"), 
+         W1 = tolower(W1)) %>% 
+  mutate(W2 = str_extract(Letter.S, "\\s.*")) %>% 
+  distinct(UUID, Letter.S, W1, W2)
+```
+
+
+```{r}
+letterS_grids <- whisperx_data %>% 
+  filter(Prompt == "S") %>% 
+  group_by(UUID) %>% 
+  mutate(next_item = lead(item)) %>% 
+  ungroup() %>% 
+  select(UUID, Prompt, item, next_item, start, dur) # drop subseqRT here because it has to be recalculated anyway
+
+
+joined_letterS <- letterS_grids %>% 
+  rename(W1 = item) %>% 
+  full_join(letterS_2word, by = c("UUID", "W1")) 
+
+
+final_letterS <- joined_letterS %>% 
+  mutate(compound = case_when(
+    str_detect(W2, next_item) ~ "YES",
+    .default = "NO")) %>% 
+   mutate(W1 = case_when(
+    compound == "YES" ~ Letter.S,
+    .default = W1)) %>% # the next item still stays in W1 then 
+  mutate(next_dur = lead(dur)) %>% 
+  mutate(dur = case_when(
+    compound == "YES" ~ dur + next_dur,
+    .default = dur)) %>% 
+  mutate(prev_compound = lag(compound))%>%  #for deleting the second word of the compound
+  filter(prev_compound == "NO") %>% 
+  select(-next_item, -Letter.S, - W2, -compound, -prev_compound, -next_dur) %>% 
+  rename(item = W1) %>%
+  group_by(UUID) %>% # calculate new subseqRT values
+  mutate(subseqRT = start - start[1])
+
+```
+
+ 
+```{r}
+rm(letter_S, letterS_2word, letterS_grids, joined_letterS)
+```
+
+## 1.4 Phonemic VF: M 
+
+```{r}
+letter_M <- annotations %>% 
+  select(UUID, Letter.M) %>% 
+  drop_na(Letter.M)
+
+
+letter_M <- letter_M %>% 
+  mutate(Letter.M = str_remove_all(Letter.M, "\\(.*\\)")) %>% #remove text between parentheses
+  mutate(Letter.M = str_remove_all(Letter.M, ".*,")) %>% #remove words before commas (i.e. when a subordinate term was used)
+  mutate(Letter.M = str_remove_all(Letter.M, ".*\\s\\/")) %>% #remove words before forward slash (i.e. when a subordinate term was used)
+  mutate(Letter.M = str_remove_all(Letter.M, ".*\\sx\\d")) %>% #remove x2 (or other numbers) %>% 
+  mutate(Letter.M = str_remove_all(Letter.M, ".*\\s\\dx")) %>% #remove 2x (or other numbers) %>% 
+  mutate(Letter.M = trimws(Letter.M, which = "both"))
+
+
+letter_M %>% 
+  filter(str_detect(Letter.M, " ")) %>% 
+  distinct(Letter.M)
+
+
+letter_M <- letter_M%>% 
+  mutate(Letter.M = fct_recode(Letter.M, 
+                            "misére" = "mis re", 
+                            "mozaiek" = "moza ek",
+                            "maiskolf" = "ma skolf",
+                            "maatschappelijk werker" = "maatschappelijk werker?",
+                            "medisch centrum" = "medisch centrum?",
+                            "magier" = "magi r",
+                            "mondhygienist" = "mondhygi nist",
+                            "manierisme" = "mani risme")) %>%
+  filter(UUID != "uuid-024d872b-3164-4708-b0ed-110377fbfe53") %>%
+  filter(UUID != "uuid-03b9e3f6-c010-4f5c-8539-e3cfc5b74c7d")
+
+
+letterM_2word <- letter_M %>% 
+  group_by(UUID) %>% 
+  filter(str_detect(Letter.M, " ")) %>% 
+  mutate(W1 = str_extract(Letter.M, ".*\\s"),
+         W1 = trimws(W1, which = "both"), 
+         W1 = tolower(W1)) %>% 
+  mutate(W2 = str_extract(Letter.M, "\\s.*")) %>% 
+  distinct(UUID, Letter.M, W1, W2)
+```
+
+
+```{r}
+letterM_grids <- whisperx_data %>% 
+  filter(Prompt == "M") %>% 
+  group_by(UUID) %>% 
+  mutate(next_item = lead(item)) %>% 
+  ungroup() %>% 
+  select(UUID, Prompt, item, next_item, start, dur) # drop subseqRT here because it has to be recalculated anyway
+
+
+joined_letterM <- letterM_grids %>% 
+  rename(W1 = item) %>% 
+  full_join(letterM_2word, by = c("UUID", "W1")) 
+
+
+final_letterM <- joined_letterM %>% 
+  mutate(compound = case_when(
+    str_detect(W2, next_item) ~ "YES",
+    .default = "NO")) %>% 
+   mutate(W1 = case_when(
+    compound == "YES" ~ Letter.M,
+    .default = W1)) %>% # the next item still stays in W1 then 
+  mutate(next_dur = lead(dur)) %>% 
+  mutate(dur = case_when(
+    compound == "YES" ~ dur + next_dur,
+    .default = dur)) %>% 
+  mutate(prev_compound = lag(compound))%>%  #for deleting the second word of the compound
+  filter(prev_compound == "NO") %>% 
+  select(-next_item, -Letter.M, - W2, -compound, -prev_compound, -next_dur) %>% 
+  rename(item = W1) %>%
+  group_by(UUID) %>% # calculate new subseqRT values
+  mutate(subseqRT = start - start[1])
+```
+
+```{r}
+rm(letter_M, letterM_2word, letterM_grids, joined_letterM)
+```
+
+
+# 2: Join to factor scores
+
+We now check whether we have factor scores for all participants with VF data. We can only keep participants with complete data in order to run linear mixed models. 
+Factor scores were calculated in an earlier project (see Hintz et al., 2025).
+
+```{r}
+# load data and filter for online data and relevant scores
+allscores <- read.csv("../factor_scores_final.csv") %>% 
+  filter(exp == "online") %>% 
+  select(UUID, ling_knowledge,proc_speed_visual,working_memory,reasoning ) %>% 
+  mutate(UUID = paste0("uuid-",UUID)) %>%
+  drop_na()
+
+# how many participants with factor scores
+ allscores %>% select(UUID) %>% unique() %>% nrow()
+```
+
+```{r}
+# create a df that contains the corrected whisperx output for each prompt 
+corrected_whisper <- rbind(final_animals, final_foods, final_letterS, final_letterM)
+
+# join factor scores with corrected whisper output 
+allscores <- left_join(allscores, corrected_whisper, by = "UUID")
+
+# all participants that did not have factor scores where dropped while joining
+allscores %>% select(UUID) %>% unique() %>% nrow()
+
+# remove unnecessary df
+rm(final_animals, final_foods, final_letterS, final_letterM)
+
+summary(allscores) # summary shows one NAn row in VF data - that means there is one participant who has the relevant factor scores but no VF data
+```
+
+# 3: Calculating VF scores
+
+We now calculate each of the three VF scores 
+```{r}
+allscores <- allscores %>% 
+  group_by(UUID, Prompt) %>%
+  mutate(item_number = row_number()) %>%
+  ungroup() %>%
+  drop_na() # drops the 1 participant that has factor scores but no audio files for VF tests, so no VF data 
+
+# check how many participants -  578 
+allscores %>% select(UUID) %>% unique() %>% nrow()
+
+allscores %>% group_by(UUID, Prompt) %>% distinct(Prompt) %>% nrow() #2282; this is not 578 x 4 = 2312 because some participants do not have data for all prompts 
+```
+
+## 3.1 first RT
+```{r}
+VF_RT2first <- allscores %>%
+  filter(item_number==1)%>%
+  select(-item, -dur, -item_number, -subseqRT) %>%
+  mutate(firstRT = start * 1000) %>% # change to ms 
+  mutate(firstRT_log = log(firstRT)) %>%  # log transform because raw RT distribution is skewed
+  select(-start)
+
+length(unique(VF_RT2first$UUID))
+
+summary(VF_RT2first$firstRT)
+```
+
+
+## 3.2 subsequent RT
+
+```{r}
+VF_subseqRT <- allscores %>%
+  drop_na(start) %>% 
+  select(UUID, Prompt, subseqRT) %>%
+  group_by(UUID, Prompt) %>%
+  mutate(subseqRT = mean(subseqRT) * 1000) %>%
+  distinct()
+
+length(unique(VF_subseqRT$UUID))
+
+summary(VF_subseqRT$subseqRT)
+
+```
+
+## 3.3 Whisper sum score
+```{r}
+VF_sumScores <- allscores %>% 
+  drop_na(Prompt) %>% 
+  select(item, Prompt, UUID) %>%
+  group_by(UUID, Prompt) %>%
+  count() %>% 
+  rename(sumScore_whisp = n)
+
+length(unique(VF_sumScores$UUID))
+
+summary(VF_sumScores$sumScore_whisp)
+```
+
+
+## 3.4 Join all three VF scores
+```{r}
+verb_flu <- left_join(VF_RT2first, VF_subseqRT, by = c("UUID", "Prompt"))
+
+verb_flu <- left_join(verb_flu, VF_sumScores, by = c("UUID", "Prompt"))
+
+length(unique(verb_flu$UUID))
+
+rm(VF_RT2first, VF_subseqRT, VF_sumScores)
+
+summary(verb_flu)
+```
+
+
+
+# 4: Add and compare manual sum scores
+
+We want to check how much manually created sum scores deviate from whisperx counts to have an estimate how many people produce irrelevant speech during the trial (which is picked up by the Whisperx transcription) or how much noise is in these trials. We exclude trials with strongly deviating counts (between manual and Whisperx).
+
+
+Load manual sum scores 
+```{r}
+data <- read_tsv("../verbal_fluency_item_data_preprocessed.txt")
+
+all_scores = c()
+for (UUID in unique(data$UUID)) {     
+  N_Dieren = nrow(data[data$UUID == UUID & !is.na(data$Dieren),])
+  N_EtenDrinken = nrow(data[data$UUID == UUID & !is.na(data$Eten...Drinken),])
+  N_M = nrow(data[data$UUID == UUID & !is.na(data$Letter.M),])
+  N_S = nrow(data[data$UUID == UUID & !is.na(data$Letter.S),])
+  
+  score_Categories = (N_Dieren + N_EtenDrinken) / 2
+  score_Letters = (N_M + N_S) / 2
+  
+  scores = cbind(UUID, N_Dieren, N_EtenDrinken, N_M, N_S, score_Categories, score_Letters)
+  all_scores = rbind(all_scores, scores)
+}
+
+all_scores_transcribed = as.data.frame(all_scores)
+
+all_scores_transcribed <- all_scores_transcribed %>% 
+  select(UUID, dieren = N_Dieren, eten = N_EtenDrinken, M = N_M, S = N_S) %>% 
+  mutate(across(c(dieren, eten, M, S), as.numeric))%>% 
+  mutate(UUID = paste0("uuid-", UUID))
+
+```
+
+
+```{r}
+all_scores_transcribed <- all_scores_transcribed %>% 
+  pivot_longer(
+    cols = c(dieren, eten, M, S), 
+    names_to = "Prompt", 
+    values_to = "sumScore_man"
+  )
+
+# join manual sum scores with VF data 
+verb_flu <- left_join(verb_flu, all_scores_transcribed, by = c("UUID", "Prompt"))
+
+summary(verb_flu) # there are 8 Nans because 4 participants are missing manual sum scores
+
+```
+
+## 4.1 Missing sum scores
+
+There are no manual sum scores for 4 participants, thus they are completely excluded  
+
+```{r}
+# participants and their number of trials that are excluded because of missing sum scores
+verb_flu %>% 
+  filter(is.na(sumScore_man)) %>%
+  group_by(UUID) %>%
+  count()
+
+verb_flu <- verb_flu %>%
+  drop_na(sumScore_man)
+
+# how many participants are left
+verb_flu %>% select(UUID) %>% unique() %>% nrow()
+```
+
+
+## 4.2 Sum score of zero
+
+Next we exclude all trials where participants have a manual sum score of zero since this means they have not properly performed the task
+```{r}
+# how many trials with manual sum score of zero
+verb_flu %>% 
+  filter(sumScore_man == 0) %>%
+  nrow()
+
+verb_flu <- verb_flu %>% 
+  filter(sumScore_man > 0)
+
+# how many participants are still left
+verb_flu %>% select(UUID) %>% unique() %>% nrow()
+# how many data points
+verb_flu %>% nrow()
+```
+
+## 4.3 Noisy trials 
+
+In order to exclude trials that have too much irrelevant speech we compare the automatic whisperx sum scores with the manually created sum scores.
+For semantic prompts, more than 10 words, and for phonemic prompts, more than 8 words deviation are considered 'too noisy'
+(semantic and phonemic cutoffs are different because average performance differs between the two, with people producing more words in the semantic tasks compared to the phonemic ones).
+
+```{r}
+verb_flu <- verb_flu %>% 
+  mutate(noisy = case_when(
+    Prompt %in% c("eten", "dieren") & sumScore_man >= sumScore_whisp - 10  ~ "NO",
+    Prompt %in% c("S", "M") & sumScore_man >= sumScore_whisp - 8  ~ "NO",
+    .default = "YES"))
+
+# investigate how many participants are excluded completely (all 4 available trials) due to noise
+verb_flu %>% 
+  filter(noisy == "YES") %>%
+  group_by(UUID) %>%
+  count() %>% 
+  filter(n==4) #3
+
+# exclusions in terms of data points/rows
+verb_flu %>% 
+  filter(noisy == "YES") %>% 
+  nrow() #92 
+```
+
+
+```{r}
+verb_flu <- verb_flu %>% 
+  filter(noisy == "NO") %>% #excludes all trials where we are missing either data or where participants had a lot of irrelevant speech
+  select(-noisy, -sumScore_whisp)%>%
+  rename(sumScore = sumScore_man)
+
+
+summary(verb_flu) # no more Nans 
+
+# how many participants are left
+verb_flu %>% select(UUID) %>% unique() %>% nrow() #571
+# how many data points
+verb_flu %>% nrow()
+```
+To conclude: 
+578 to 571 participants (2282 to 2147 data points; 135 rows excluded; 92 due to noisy data, 8 due to missing sum score, 35 due to sum scores of zero)
+7 participants -> 4 because of missing manual sum scores and 3 because of too noisy data in all trials 
+For the 571 remaining participants, not everyone has data for all four VF prompts; certain trials might be missing/were excluded 
+
+
+# 5: Descriptives
+
+## Summary statistics
+```{r}
+# summary statistics for DV
+df.summary <- verb_flu %>%
+  select(Prompt, firstRT, subseqRT, sumScore) %>%
+  group_by(Prompt) %>% 
+  summarise(across(c(firstRT, subseqRT, sumScore), list(min = ~min(., na.rm=TRUE), q25 = ~quantile(., 0.25, na.rm=TRUE), median = ~median(., na.rm=TRUE), q75 = ~quantile(., 0.75, na.rm=TRUE), max = ~max(., na.rm=TRUE), mean = ~mean(., na.rm=TRUE), sd = ~sd(., na.rm=TRUE), var = ~var(., na.rm=TRUE)), .names = "{.col}.{.fn}") )
+
+  
+# reshape it using tidyr functions
+summary_stats_DV <- df.summary %>%
+  pivot_longer(-Prompt, names_to = "stat")%>%
+  separate_wider_delim(stat, ".", names = c("variable", "statistic")) %>%
+  mutate(value = round(value,2)) %>%
+  spread(statistic, value) %>%
+  mutate(across(where(is.numeric), round, 0)) %>% 
+  mutate(
+    scale = case_when(
+      variable == "sumScore" ~ "total",
+      TRUE ~ "ms"), 
+    type = case_when(
+      Prompt == "dieren" ~ "Semantic",
+      Prompt == "eten" ~ "Semantic",
+      TRUE ~  "Phonemic"
+    )) %>%
+  mutate(Prompt = fct_recode(Prompt, "Animals" = "dieren", "Food/Drink" = "eten")) %>% 
+  select(type, Prompt, variable, scale, mean, sd, min, q25, median, q75, max) %>% 
+  arrange(variable) %>% 
+janitor::clean_names(case = "title")
+
+summary_stats_DV
+
+summary_stats_DV %>% 
+  kableExtra::kbl(format = "markdown") 
+```
+
+```{r}
+# summary statistics for semantic scores
+df.summary <- verb_flu %>%
+  filter(Prompt== "dieren" | Prompt== "eten") %>%
+  select(firstRT, subseqRT, sumScore) %>%
+  summarise(across(c(firstRT, subseqRT, sumScore), list(min = ~min(., na.rm=TRUE), q25 = ~quantile(., 0.25, na.rm=TRUE), median = ~median(., na.rm=TRUE), q75 = ~quantile(., 0.75, na.rm=TRUE), max = ~max(., na.rm=TRUE), mean = ~mean(., na.rm=TRUE), sd = ~sd(., na.rm=TRUE)), .names = "{.col}.{.fn}") )
+  
+# reshape it using tidyr functions
+summary_stats_DV_sem <- df.summary %>%
+  pivot_longer( everything(), names_to = "stat")%>%
+  separate_wider_delim(stat, ".", names = c("variable", "statistic")) %>%
+  mutate(value = round(value,0)) %>%
+  spread(statistic, value) %>%
+  select(variable, min, q25, median, q75, max, mean, sd) # reorder columns
+
+summary_stats_DV_sem
+
+summary_stats_DV_sem %>% 
+  kableExtra::kbl(format = "markdown") 
+```
+
+```{r}
+# summary statistics for phonemic scores
+df.summary <- verb_flu %>%
+  filter(Prompt== "S" | Prompt== "M") %>%
+  select(firstRT, firstRT_log, subseqRT, sumScore) %>%
+  summarise(across(c(firstRT, subseqRT, sumScore), list(min = ~min(., na.rm=TRUE), q25 = ~quantile(., 0.25, na.rm=TRUE), median = ~median(., na.rm=TRUE), q75 = ~quantile(., 0.75, na.rm=TRUE), max = ~max(., na.rm=TRUE), mean = ~mean(., na.rm=TRUE), sd = ~sd(., na.rm=TRUE)), .names = "{.col}.{.fn}") )
+  
+# reshape it using tidyr functions
+summary_stats_DV_phon <- df.summary %>%
+  pivot_longer( everything(), names_to = "stat")%>%
+  separate_wider_delim(stat, ".", names = c("variable", "statistic")) %>%
+  mutate(value = round(value,0)) %>%
+  spread(statistic, value) %>%
+  select(variable, min, q25, median, q75, max, mean, sd) # reorder columns
+
+summary_stats_DV_phon
+
+summary_stats_DV_phon %>% 
+  kableExtra::kbl(format = "markdown") 
+
+```
+
+
+
+## Correlations
+
+how many data points for semantic vs phonemic VF 
+```{r}
+verb_flu %>% 
+  filter(Prompt %in% c("M", "S")) %>% 
+  nrow()
+
+verb_flu %>% 
+  filter(Prompt %in% c("eten", "dieren")) %>% 
+  nrow()
+```
+
+```{r}
+(corr_sem <- verb_flu %>%
+  filter(Prompt== "dieren" | Prompt== "eten") %>%
+  select(sumScore, subseqRT, firstRT_log, everything()) %>% 
+  select(-UUID, -firstRT, - Prompt) %>%
+  drop_na(sumScore) %>%
+  cor(method = "pearson")%>%
+  ggcorrplot(type = "lower", method = 'square',lab= TRUE, title = "Semantic VF", ggtheme = theme_void()) +
+   theme(legend.position = "none"))
+
+#ggsave("../figs/Fig_thesis_corr_sem.png", corr_sem,  bg = "white", width = 30, height = 10, units = "cm")
+
+(corr_phon <- verb_flu %>%
+  filter(Prompt== "S" | Prompt== "M") %>%
+  select(sumScore, subseqRT, firstRT_log, everything()) %>% 
+  select(-UUID, -firstRT, - Prompt) %>%
+  drop_na(sumScore) %>%
+  cor(method = "pearson")%>%
+  ggcorrplot(type = "lower", method = 'square',lab= TRUE, title = "Phonemic VF", ggtheme = theme_void()) +
+   theme(legend.position = "none"))
+
+
+#ggsave("../figs/Fig_thesis_corr_phon.png", corr_phon,  bg = "white", width = 30, height = 10, units = "cm")
+```
+
+## Distributions
+
+```{r}
+hist(verb_flu$sumScore, breaks = 30)
+hist(verb_flu$firstRT, breaks = 100)
+hist(verb_flu$firstRT_log, breaks = 100)
+hist(verb_flu$subseqRT, breaks = 100)
+```
+
+```{r}
+verb_flu %>%
+  filter(Prompt== "dieren" | Prompt== "eten") %>%
+  ggplot(aes(firstRT_log)) +
+  geom_histogram(binwidth = 0.1)
+
+
+verb_flu %>%
+  filter(Prompt== "S" | Prompt== "M") %>%
+  ggplot(aes(firstRT_log)) +
+  geom_histogram(binwidth = 0.1)
+  
+```
+
+subsequent RT
+```{r}
+verb_flu %>%
+  filter(Prompt== "dieren" | Prompt== "eten") %>%
+  ggplot(aes(subseqRT)) +
+  geom_histogram(binwidth = 100)
+
+
+verb_flu %>%
+  filter(Prompt== "S" | Prompt== "M") %>%
+  ggplot(aes(subseqRT)) +
+  geom_histogram(binwidth = 100)
+  
+```
+
+sum scores
+```{r}
+verb_flu %>%
+  filter(Prompt== "dieren" | Prompt== "eten") %>%
+  ggplot(aes(sumScore)) +
+  geom_histogram(binwidth = 1)
+
+
+verb_flu %>%
+  filter(Prompt== "S" | Prompt== "M") %>%
+  ggplot(aes(sumScore)) +
+  geom_histogram(binwidth = 1)
+  
+```
+
+factor scores
+```{r}
+par(mfrow = c(2,2))
+hist(verb_flu$ling_knowledge)
+hist(verb_flu$proc_speed_visual)
+hist(verb_flu$working_memory)
+hist(verb_flu$reasoning)
+```
+
+
+
+# 6: z-scoring + LMM data
+(dataframes for LMM ->  2 df with 6 rows per participant)
+
+Separate into semantic and phonemic dataframes and calculate z-scores and pivot to longer format
+```{r}
+sem_data <- verb_flu %>%
+  filter(Prompt== "dieren" | Prompt== "eten") %>%
+  mutate(ling_knowledge_z = (ling_knowledge - mean(ling_knowledge))/sd(ling_knowledge),
+         proc_speed_visual_z = (proc_speed_visual - mean(proc_speed_visual)) / sd(proc_speed_visual),
+         working_memory_z = (working_memory - mean(working_memory)) / sd(working_memory),
+         reasoning_z = (reasoning - mean(reasoning)) / sd(reasoning),
+         subseqRT_z = (subseqRT - mean(subseqRT))/ sd(subseqRT),
+         sumScore_z = (sumScore - mean(sumScore, na.rm = TRUE)) / sd(sumScore, na.rm = TRUE), 
+         firstRT_z = (firstRT_log - mean(firstRT_log)) / sd(firstRT_log)
+  ) %>%
+  select(-ling_knowledge,-proc_speed_visual, -working_memory, -reasoning, -firstRT, -firstRT_log, -subseqRT, -sumScore) %>%
+  pivot_longer(cols = c("subseqRT_z", "sumScore_z", "firstRT_z"), names_to = "measure", values_to = "z_scores")
+
+length(unique(sem_data$UUID))
+
+phon_data <-verb_flu %>%
+  filter(Prompt== "M" | Prompt== "S") %>%
+  mutate(ling_knowledge_z = (ling_knowledge - mean(ling_knowledge))/sd(ling_knowledge),
+         proc_speed_visual_z = (proc_speed_visual - mean(proc_speed_visual)) / sd(proc_speed_visual),
+         working_memory_z = (working_memory - mean(working_memory)) / sd(working_memory),
+         reasoning_z = (reasoning - mean(reasoning)) / sd(reasoning),
+         subseqRT_z = (subseqRT - mean(subseqRT))/ sd(subseqRT),
+         sumScore_z = (sumScore - mean(sumScore, na.rm = TRUE)) / sd(sumScore, na.rm = TRUE), 
+         firstRT_z = (firstRT_log - mean(firstRT_log)) / sd(firstRT_log)
+  ) %>%
+  select(-ling_knowledge,-proc_speed_visual,-working_memory,-reasoning, -firstRT, -firstRT_log, -subseqRT, -sumScore) %>%
+  pivot_longer(cols = c("subseqRT_z", "sumScore_z", "firstRT_z"), names_to = "measure", values_to = "z_scores")
+
+length(unique(phon_data$UUID))
+```
+
+Save the final dataframe
+```{r}
+#write.csv(sem_data, "../sem_data_FINAL_230225.csv")
+#write.csv(phon_data, "../phon_data_FINAL_230225.csv")
+```
+
+
+
+# 7: Random forests data
+
+1 df with 1 row per participant
+```{r}
+rf_data_1 <- verb_flu %>%
+  filter(Prompt== "dieren" | Prompt== "eten") %>%
+  group_by(UUID) %>%
+  mutate(VF_sem_firstRT = mean(firstRT),
+         VF_sem_subseqRT = mean(subseqRT),
+         VF_sem_sumScore = mean(sumScore, na.rm = TRUE)) %>%
+  ungroup() %>%
+  select(VF_sem_firstRT, VF_sem_subseqRT, VF_sem_sumScore, UUID)
+
+rf_data_2 <- verb_flu %>%
+  filter(Prompt== "S" | Prompt== "M") %>%
+  group_by(UUID) %>%
+  mutate(VF_phon_firstRT = mean(firstRT),
+         VF_phon_subseqRT = mean(subseqRT),
+         VF_phon_sumScore = mean(sumScore, na.rm = TRUE)) %>%
+   ungroup() %>%
+  select(VF_phon_firstRT, VF_phon_subseqRT, VF_phon_sumScore, UUID)
+
+rf_data_3 <- verb_flu %>%
+  select(ling_knowledge, proc_speed_visual, working_memory, reasoning, UUID)
+
+rf_data <- merge(x= rf_data_1, y= rf_data_2, by="UUID", all = TRUE)
+
+rf_data <- merge(x= rf_data, y= rf_data_3, by="UUID") %>%
+  unique()
+
+rf_data %>% select(UUID) %>% unique() %>% nrow()
+
+rm(rf_data_1, rf_data_2, rf_data_3)
+```
+
+Export final dataframe 
+```{r}
+#write.csv(rf_data, "../rf_data_FINAL_250225.csv")
+```
+
+
+
+
+# Exploration: Word frequencies
+```{r}
+#dataframe with word frequencies for semantic prompts
+frequency_dataframe_sem <- allscores %>% 
+  filter(UUID %in% sem_data$UUID) %>%
+  filter(Prompt == "dieren" | Prompt == "eten") %>%
+  count(item, Prompt) %>% 
+  arrange(desc(n))
+
+head(frequency_dataframe_sem)
+
+#dataframe with word frequencies for phonemic prompts
+frequency_dataframe_phon <- allscores %>% 
+  filter(UUID %in% phon_data$UUID) %>%
+  filter(Prompt == "M" | Prompt == "S") %>%
+  count(item, Prompt) %>% 
+  arrange(desc(n))
+
+head(frequency_dataframe_phon)
+
+#dataframes with word frequencies for first word 
+#calculate the count for each first produced word and arrange top 5 per prompt in descending order 
+frequency_firstWord_sem <- allscores %>% 
+  filter(UUID %in% sem_data$UUID) %>% 
+  filter(Prompt == "dieren" | Prompt == "eten") %>%
+  filter(item_number == 1) %>%  
+  group_by(Prompt) %>% 
+  count(item) %>% 
+  mutate(freq = n / sum(n)) %>% 
+  arrange(desc(n), .by_group = TRUE) %>% 
+  top_n(5) 
+
+frequency_firstWord_sem %>% 
+  kableExtra::kbl(format = "markdown")
+
+frequency_firstWord_phon <- allscores %>% 
+  filter(UUID %in% phon_data$UUID) %>% 
+  filter(Prompt == "S" | Prompt == "M") %>%
+  filter(item_number == 1) %>%  
+  group_by(Prompt) %>% 
+  count(item) %>% 
+  mutate(freq = n / sum(n)) %>% 
+  arrange(desc(n), .by_group = TRUE) %>% 
+  top_n(5) 
+
+frequency_firstWord_phon %>% 
+  kableExtra::kbl(format = "markdown")
+
+```
+
+
+
