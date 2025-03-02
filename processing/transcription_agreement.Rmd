@@ -1,0 +1,326 @@
+---
+title: "transcription agreement"
+output:
+  word_document: default
+  html_document: default
+date: "2024-06-17"
+---
+
+In this script we compare which automatic processing tools are most useful to capture timing aspects of verbal fluency data. For this, we first compare multiple tools (Whisperx, WebMaus, Praat silence detection) against manual transcriptions in their ability to capture pauses/silences. However, since data seems to noisy in this regard, our main comparison is then for word onsets and looks at Whisperx and WebMaus against the manual gold standard. 
+
+Whisperx:https://github.com/m-bain/whisperX 
+WebMaus: https://clarin.phonetik.uni-muenchen.de/BASWebServices/interface/WebMAUSBasic 
+Praat (silence detection):https://www.fon.hum.uva.nl/praat/manual/Sound__To_TextGrid__silences____.html  
+
+# Setup
+```{r results = 'hide', message=FALSE, warning=FALSE}
+library(tidyverse)
+```
+
+Read in data 
+```{r results = 'hide', message=FALSE, warning=FALSE}
+vf_whisperx <-read_csv("output/textgrid/merged_CSVs.csv") %>% 
+  group_by(id) %>%
+  mutate(item_number = row_number())
+
+vf_webmouse <- read_csv("output/webmouse/merged_CSVs.csv") %>% 
+  group_by(id) %>%
+  mutate(item_number = row_number())
+
+vf_manual <- read_csv("output/manual/merged_CSVs.csv") %>% 
+  group_by(id) %>%
+  mutate(item_number = row_number())
+
+vf_silences <- read_csv("output/praat_silences/merged_CSVs.csv") %>% 
+  group_by(id) %>%
+  mutate(item_number = row_number())
+```
+
+Join and separate condition info
+```{r results = 'hide', message=FALSE, warning=FALSE}
+vf_wh <- full_join(vf_manual, vf_whisperx, by = c("id", "item_number"), suffix = c("_manual", "_whisperx")) %>% 
+  separate(id, into = c("par", "cond"), sep = "_") %>% 
+  mutate(cond = recode_factor(cond, 
+                       "RecorderDieren" = "Sem_Dieren",
+                       "RecorderEtenDrinken" = "Sem_Eten",
+                       "RecorderS" = "Phon_S", 
+                       "RecorderM" = "Phon_M")) %>% 
+  separate(cond, into = c("cond", "prompt"), sep = "_")
+
+vf_wm <- full_join(vf_manual, vf_webmouse, by = c("id", "item_number"), suffix = c("_manual", "_webmaus")) %>% 
+  separate(id, into = c("par", "cond"), sep = "_") %>% 
+  mutate(cond = recode_factor(cond, 
+                       "RecorderDieren" = "Sem_Dieren",
+                       "RecorderEtenDrinken" = "Sem_Eten",
+                       "RecorderS" = "Phon_S", 
+                       "RecorderM" = "Phon_M")) %>% 
+  separate(cond, into = c("cond", "prompt"), sep = "_")
+
+vf_praat <- full_join(vf_manual, vf_silences, by = c("id", "item_number"), suffix = c("_manual", "_praat")) %>% 
+  separate(id, into = c("par", "cond"), sep = "_") %>% 
+  mutate(cond = recode_factor(cond, 
+                       "RecorderDieren" = "Sem_Dieren",
+                       "RecorderEtenDrinken" = "Sem_Eten",
+                       "RecorderS" = "Phon_S", 
+                       "RecorderM" = "Phon_M")) %>% 
+  separate(cond, into = c("cond", "prompt"), sep = "_")
+```
+
+
+# Agreement between transcribed Pauses
+Start and length of pause
+
+## Whisper
+```{r}
+vf_wh <- vf_wh %>% 
+  mutate(item_agree = case_when(item_whisperx == item_manual ~ TRUE, .default = FALSE)) 
+
+vf_wh %>% 
+  group_by(par, prompt) %>% 
+  summarize(agrees = sum(item_agree == T), disagrees = sum(item_agree == F)) %>% 
+  mutate(perc = round(agrees/(agrees+disagrees), 2) * 100) %>% 
+  arrange(prompt)
+```
+
+```{r}
+pause_man <- vf_wh %>% 
+  filter(item_manual == "pause") %>% 
+  select(start_manual, dur_manual, item_manual, par, cond, prompt)
+  
+pause_whisp <- vf_wh %>% 
+  filter(item_whisperx == "pause") %>% 
+  select(start_whisperx, dur_whisperx, item_whisperx, par, cond, prompt)
+  
+
+(wh_sem <-  ggplot() +
+  geom_line(aes(x=start_manual, y = dur_manual), data = subset(pause_man, pause_man$cond == "Sem"), color = "red", size = 1) +
+  geom_line(aes(x=start_whisperx, y = dur_whisperx), data = subset(pause_whisp, pause_whisp$cond == "Sem"), color = "steelblue", size = 1, alpha = 0.8) +
+  theme_minimal() +
+  facet_wrap( ~ par + prompt)+
+    labs(subtitle = "WhisperX (blue) vs. hand-coded (red): Semantic  VF"))
+  
+(wh_ph  <-  ggplot() +
+  geom_line(aes(x=start_manual, y = dur_manual), data = subset(pause_man, pause_man$cond == "Phon"), color = "red", size = 1) +
+  geom_line(aes(x=start_whisperx, y = dur_whisperx), data = subset(pause_whisp, pause_whisp$cond == "Phon"), color = "steelblue", size = 1, alpha = 0.8) +
+  theme_minimal() +
+  facet_wrap( ~ par + prompt)+
+    labs(subtitle = "WhisperX (blue) vs. hand-coded (red): Phonological  VF"))
+
+
+#ggsave("figs/wh_sem.png", wh_sem, width = 11, height = 7, units = "in")
+#ggsave("figs/wh_ph.png", wh_sem, width = 11, height = 7, units = "in")
+```
+
+
+## Webmaus
+```{r}
+vf_wm <- vf_wm %>% 
+  mutate(item_agree = case_when(item_webmaus == item_manual ~ TRUE, .default = FALSE)) 
+
+vf_wm %>% 
+  group_by(par, prompt) %>% 
+  summarize(agrees = sum(item_agree == T), disagrees = sum(item_agree == F)) %>% 
+  mutate(perc = round(agrees/(agrees+disagrees), 2) * 100) %>% 
+  arrange(prompt)
+```
+
+```{r}
+pause_wm <- vf_wm %>% 
+  filter(item_webmaus == "pause") %>% 
+  select(start_webmaus, dur_webmaus, item_webmaus, par, cond, prompt)
+
+(wm_sem <-   ggplot() +
+  geom_line(aes(x=start_manual, y = dur_manual), data = subset(pause_man, pause_man$cond == "Sem"), color = "red", size = 1) +
+  geom_line(aes(x=start_webmaus, y = dur_webmaus),  data = subset(pause_wm, pause_wm$cond == "Sem"), color = "darkgreen", size = 1, alpha = 0.8) +
+  theme_minimal() + 
+  facet_wrap( ~ par + prompt) +
+    labs(subtitle = "Webmaus (green) vs. hand-coded (red): Semantic  VF"))
+
+(wm_phon <-   ggplot() +
+  geom_line(aes(x=start_manual, y = dur_manual), data = subset(pause_man, pause_man$cond == "Phon"), color = "red", size = 1) +
+  geom_line(aes(x=start_webmaus, y = dur_webmaus),  data = subset(pause_wm, pause_wm$cond == "Phon"), color = "darkgreen", size = 1, alpha = 0.8) +
+  theme_minimal() + 
+  facet_wrap( ~ par + prompt) +
+    labs(subtitle = "Webmaus (green) vs. hand-coded (red): Phonological  VF"))
+  
+
+#ggsave("figs/wm_sem.png", wm_sem, width = 11, height = 7, units = "in")
+#ggsave("figs/wm_phon.png", wm_phon, width = 11, height = 7, units = "in")
+```
+
+
+## Praat
+```{r}
+pause_praat <- vf_praat %>% 
+  filter(item_praat == "silent") %>% 
+  select(start_praat, dur_praat, item_praat, par, cond, prompt)
+
+(pr_sem <-  ggplot() +
+  geom_line(aes(x=start_manual, y = dur_manual), data = subset(pause_man, pause_man$cond == "Sem"), color = "red", size = 1) +
+  geom_line(aes(x=start_praat, y = dur_praat),  data = subset(pause_praat, pause_praat$cond == "Sem"), color = "purple", size = 1, alpha = 0.7) +
+  theme_minimal() + 
+  facet_wrap( ~ par + prompt) +
+    labs(subtitle = "Praat silence detector (purple) vs. hand-coded (red): Semantic  VF"))
+
+(pr_phon <- ggplot() +
+  geom_line(aes(x=start_manual, y = dur_manual), data = subset(pause_man, pause_man$cond == "Phon"), color = "red", size = 1) +
+  geom_line(aes(x=start_praat, y = dur_praat),  data = subset(pause_praat, pause_praat$cond == "Phon"), color = "purple", size = 1, alpha = 0.7) +
+  theme_minimal() + 
+  facet_wrap( ~ par + prompt) +
+    labs(subtitle = "Praat silence detector (purple) vs. hand-coded (red): Phonological  VF"))
+
+
+
+#ggsave("figs/pr_sem.png", pr_sem, width = 11, height = 7, units = "in")
+#ggsave("figs/pr_phon.png", pr_phon, width = 11, height = 7, units = "in")
+```
+
+
+## All three
+```{r}
+
+  ggplot() +
+  geom_line(aes(x=start_manual, y = dur_manual), data = subset(pause_man, pause_man$cond == "Sem"), color = "red", size = 0.7) +
+  geom_line(aes(x=start_webmaus, y = dur_webmaus),  data = subset(pause_wm, pause_wm$cond == "Sem"), color = "darkgreen", size = 0.7, alpha = 0.7) +
+  geom_line(aes(x=start_whisperx, y = dur_whisperx), data = subset(pause_whisp, pause_whisp$cond == "Sem"), color = "steelblue", size = 0.7) +
+  geom_line(aes(x=start_praat, y = dur_praat),  data = subset(pause_praat, pause_praat$cond == "Sem"), color = "plum", size = 0.8, alpha = 0.8) +
+  theme_minimal() + 
+  facet_wrap( ~ par + prompt) 
+ 
+
+  ggplot() +
+  geom_line(aes(x=start_manual, y = dur_manual), data = subset(pause_man, pause_man$cond == "Phon"), color = "red", size = 0.7) +
+  geom_line(aes(x=start_webmaus, y = dur_webmaus),  data = subset(pause_wm, pause_wm$cond == "Phon"), color = "darkgreen", size = 0.7, alpha = 0.7) +
+  geom_line(aes(x=start_whisperx, y = dur_whisperx), data = subset(pause_whisp, pause_whisp$cond == "Phon"), color = "steelblue", size = 0.7) +
+  geom_line(aes(x=start_praat, y = dur_praat),  data = subset(pause_praat, pause_praat$cond == "Phon"), color = "plum", size = 0.8, alpha = 0.8) +
+  theme_minimal() + 
+  facet_wrap( ~ par + prompt) 
+
+```
+
+
+
+
+# Agreement between transcribed Word onsets 
+
+```{r}
+onset_man <- vf_wh %>% 
+  filter(item_manual != "pause") %>% 
+  select(start_manual, dur_manual, item_manual, par, cond, prompt)
+  
+onset_whisp <- vf_wh %>% 
+  filter(item_whisperx != "pause") %>% 
+  select(start_whisperx, dur_whisperx, item_whisperx, par, cond, prompt)
+
+onset_wm <- vf_wm %>% 
+  filter(item_webmaus != "pause") %>% 
+  select(start_webmaus, dur_webmaus, item_webmaus, par, cond, prompt)
+  
+```
+
+## Whisper
+
+```{r}
+(onset_wh_sem <- ggplot() +
+  geom_segment(aes(x=start_whisperx, xend=start_whisperx, y = 0.3, yend = 0.1), subset(onset_whisp, onset_whisp$cond == "Sem"), color = "steelblue", size = 0.5)+
+   geom_point(aes(x=start_manual, y = 0.2), color="red", size=1, data = subset(onset_man, onset_man$cond == "Sem")) +
+  theme_minimal() +
+  labs(subtitle = "Word onsets: WhisperX (blue) vs. hand-coded (red): Semantic  VF")+
+  facet_wrap(~ par + prompt) +
+ ylim(0, 0.4))
+
+(onset_wh_phon <- ggplot() +
+  geom_segment(aes(x=start_whisperx, xend=start_whisperx, y = 0.3, yend = 0.1), subset(onset_whisp, onset_whisp$cond == "Phon"), color = "steelblue", size = 0.5,)+
+   geom_point(aes(x=start_manual, y = 0.2), color="red", size=1, data = subset(onset_man, onset_man$cond == "Phon")) +
+  theme_minimal() +
+  labs(subtitle = "Word onsets: WhisperX (blue) vs. hand-coded (red): Phonological  VF")+
+  facet_wrap(~ par + prompt) +
+ ylim(0, 0.4))
+
+
+
+#ggsave("figs/onset_wh_sem.png", onset_wh_sem, width = 11, height = 7, units = "in")
+#ggsave("figs/onset_wh_ph.png", onset_wh_phon, width = 11, height = 7, units = "in")
+```
+
+
+## Webmaus
+```{r}
+(onset_wm_sem <- ggplot() +
+  geom_segment(aes(x=start_webmaus, xend=start_webmaus, y = 0.3, yend = 0.1), subset(onset_wm, onset_wm$cond == "Sem"), color = "darkgreen", size = 0.5)+
+   geom_point(aes(x=start_manual, y = 0.2), color="red", size=1, data = subset(onset_man, onset_man$cond == "Sem")) +
+  theme_minimal() +
+  labs(subtitle = "Word onsets: Webmaus (blue) vs. hand-coded (red): Semantic  VF")+
+  facet_wrap(~ par + prompt) +
+ ylim(0, 0.4))
+
+(onset_wm_phon <- ggplot() +
+  geom_segment(aes(x=start_webmaus, xend=start_webmaus, y = 0.3, yend = 0.1), subset(onset_wm, onset_wm$cond == "Phon"), color = "darkgreen", size = 0.5)+
+   geom_point(aes(x=start_manual, y = 0.2), color="red", size=1, data = subset(onset_man, onset_man$cond == "Phon")) +
+  theme_minimal() +
+  labs(subtitle = "Word onsets: Webmaus (blue) vs. hand-coded (red): Phonological  VF")+
+  facet_wrap(~ par + prompt) +
+ ylim(0, 0.4))
+
+
+
+#ggsave("figs/onset_wm_sem.png", onset_wm_sem, width = 11, height = 7, units = "in")
+#ggsave("figs/onset_wm_phon.png", onset_wm_phon, width = 11, height = 7, units = "in")
+```
+
+
+## Both whisper and webmouse
+```{r}
+(onset_all_sem <- ggplot() +
+  geom_segment(aes(x=start_whisperx, xend=start_whisperx, y = 0.3, yend = 0.1), subset(onset_whisp, onset_whisp$cond == "Sem"), color = "steelblue", size = 0.5)+
+   geom_segment(aes(x=start_webmaus, xend=start_webmaus, y = 0.3, yend = 0.1), subset(onset_wm, onset_wm$cond == "Sem"), color = "orange", size = 0.5)+
+   geom_point(aes(x=start_manual, y = 0.2), color="red", size=1, data = subset(onset_man, onset_man$cond == "Sem")) +
+  theme_minimal() +
+  labs(subtitle = "Word onsets: WhisperX (blue) vs. Webmaus (orange) vs. hand-coded (red): Semantic  VF")+
+  facet_wrap(~ par + prompt) +
+ ylim(0, 0.4))
+
+
+
+(onset_all_phon <- ggplot() +
+  geom_segment(aes(x=start_whisperx, xend=start_whisperx, y = 0.3, yend = 0.1), subset(onset_whisp, onset_whisp$cond == "Phon"), color = "steelblue", size = 0.5,)+
+    geom_segment(aes(x=start_webmaus, xend=start_webmaus, y = 0.3, yend = 0.1), subset(onset_wm, onset_wm$cond == "Phon"), color = "orange", size = 0.5)+
+   geom_point(aes(x=start_manual, y = 0.2), color="red", size=1, data = subset(onset_man, onset_man$cond == "Phon")) +
+  theme_minimal() +
+  labs(subtitle = "Word onsets: WhisperX (blue) vs. vs. Webmaus (orange) vs. hand-coded (red): Phonological  VF")+
+  facet_wrap(~ par + prompt) +
+ ylim(0, 0.4))
+
+
+#ggsave("figs/onset_all_sem.png", onset_all_sem, width = 11, height = 7, units = "in")
+#ggsave("figs/onset_all_phon.png", onset_all_phon, width = 11, height = 7, units = "in")
+```
+
+
+for one participant (for visualization)
+```{r}
+(onset_sem <- ggplot() +
+  geom_segment(aes(x=start_whisperx, xend=start_whisperx, y = 0.3, yend = 0.1), subset(onset_whisp, (onset_whisp$cond == "Sem" & onset_whisp$par == "uuid-00cd06f7-391f-42b7-8c19-c11a41008a90")), color = "steelblue", size = 0.5)+
+   geom_segment(aes(x=start_webmaus, xend=start_webmaus, y = 0.3, yend = 0.1), subset(onset_wm, (onset_wm$cond == "Sem" & onset_wm$par == "uuid-00cd06f7-391f-42b7-8c19-c11a41008a90")), color = "orange", size = 0.5)+
+   geom_point(aes(x=start_manual, y = 0.2), color="red", size=1, data = subset(onset_man, (onset_man$cond == "Sem" & onset_man$par == "uuid-00cd06f7-391f-42b7-8c19-c11a41008a90"))) +
+  theme_minimal() +
+  labs(subtitle = "Word onsets: WhisperX (blue) vs. Webmaus (orange) vs. hand-coded (red): Semantic  VF")+
+  facet_wrap(~ par + prompt) +
+ ylim(0, 0.4))
+
+
+
+(onset_phon <- ggplot() +
+    geom_segment(aes(x=start_whisperx, xend=start_whisperx, y = 0.3, yend = 0.1), subset(onset_whisp, (onset_whisp$cond == "Phon" & onset_whisp$par == "uuid-00cd06f7-391f-42b7-8c19-c11a41008a90")), color = "steelblue", size = 0.5)+
+   geom_segment(aes(x=start_webmaus, xend=start_webmaus, y = 0.3, yend = 0.1), subset(onset_wm, (onset_wm$cond == "Phon" & onset_wm$par == "uuid-00cd06f7-391f-42b7-8c19-c11a41008a90")), color = "orange", size = 0.5)+
+   geom_point(aes(x=start_manual, y = 0.2), color="red", size=1, data = subset(onset_man, (onset_man$cond == "Phon" & onset_man$par == "uuid-00cd06f7-391f-42b7-8c19-c11a41008a90"))) +
+  theme_minimal() +
+  labs(subtitle = "Word onsets: WhisperX (blue) vs. Webmaus (orange) vs. hand-coded (red): Semantic  VF")+
+  facet_wrap(~ par + prompt) +
+ ylim(0, 0.4))
+  
+
+
+#ggsave("figs/onset_1P_sem.png", onset_all_sem, width = 11, height = 7, units = "in")
+#ggsave("figs/onset_1P_phon.png", onset_all_phon, width = 11, height = 7, units = "in")
+```
